@@ -1,0 +1,180 @@
+# 7. Resource Embedding with resource_tools Library
+
+Date: 2025-12-26
+
+## Status
+
+Accepted
+
+## Context
+
+Examples in this project need to embed binary resources (PNG images, TTF fonts, etc.) into executables for distribution. This requires:
+
+1. **Cross-platform support**: Different mechanisms on Windows (RC files) vs. Linux (object file linking)
+2. **Build-time integration**: Resources must be embedded during compilation
+3. **Type-safe access**: C++ code needs safe, convenient access to embedded data
+4. **Minimal boilerplate**: Adding resources should be straightforward
+5. **Error handling**: Resource loading failures must be detectable
+
+## Decision
+
+Use the external [resource_tools](https://github.com/rvodden/resource_tools) library for all resource embedding.
+
+**Core approach:**
+- Single `embed_resources()` CMake function per example
+- Automatic header generation with consistent API
+- Link `resource_tools::resource_tools` library for runtime access
+- Generated headers placed in build directory
+- Each example uses its own namespace to avoid conflicts
+
+## Rationale
+
+**Why external library vs. custom implementation:**
+- Platform-specific complexity (RC files, linker flags) handled in one place
+- Reduced CMake boilerplate (~10 lines vs. ~65 lines per example)
+- Consistent API across all examples
+- Built-in error handling via `ResourceResult` type
+- Library improvements benefit all users automatically
+
+**Why resource_tools specifically:**
+- C++20 compatible, minimal dependencies
+- Security-focused (path validation, bounds checking)
+- Well-documented with examples
+- Clean separation between build-time and runtime concerns
+
+## Implementation
+
+### CMake Setup
+
+**In example's main `CMakeLists.txt`:**
+```cmake
+find_package(SDLXX REQUIRED)
+find_package(resource_tools REQUIRED)  # Required for resource embedding
+```
+
+**In example's `data/CMakeLists.txt`:**
+```cmake
+embed_resources(
+    TARGET ${PROJECT_NAME}
+    RESOURCES tic_tac_toe.png
+    RESOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}
+    HEADER_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/include
+    NAMESPACE tictactoe
+)
+
+target_include_directories(${PROJECT_NAME}-data
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/include>
+)
+```
+
+**In example's main `CMakeLists.txt`:**
+```cmake
+target_link_libraries(${PROJECT_NAME}-static PUBLIC
+    ${PROJECT_NAME}-data
+    resource_tools::resource_tools
+)
+```
+
+### C++ Usage
+
+**Generated header** (`tictactoe/embedded_data.h`):
+```cpp
+namespace tictactoe {
+  inline auto getTicTacToePNG() -> resource_tools::ResourceResult {
+    return resource_tools::getResource(&_binary_tic_tac_toe_png_start,
+                                      &_binary_tic_tac_toe_png_end);
+  }
+}
+```
+
+**Application code:**
+```cpp
+#include <tictactoe/embedded_data.h>
+
+auto res = tictactoe::getTicTacToePNG();
+if (!res) {
+    throw std::runtime_error("Failed to load sprite sheet");
+}
+auto texture = std::make_shared<sdl::Texture>(
+    *renderer, res.data, static_cast<uint32_t>(res.size));
+```
+
+### Build-Time Downloaded Resources
+
+For resources downloaded during build (e.g., Pong's font):
+
+```cmake
+# Download resource
+add_custom_command(OUTPUT ${FONT_FILE} ...)
+add_custom_target(${PROJECT_NAME}-raw_data DEPENDS ${FONT_FILE})
+
+# Embed it (use relative path from RESOURCE_DIR)
+embed_resources(
+    TARGET ${PROJECT_NAME}
+    RESOURCES PressStart2P-Regular.ttf
+    RESOURCE_DIR ${CMAKE_CURRENT_BINARY_DIR}  # Downloaded files are here
+    HEADER_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/include
+    NAMESPACE pong
+)
+
+# Ensure download completes before embedding
+add_dependencies(${PROJECT_NAME}-data ${PROJECT_NAME}-raw_data)
+```
+
+**Key point**: Use relative paths from `RESOURCE_DIR` (security requirement).
+
+## Consequences
+
+### Positive
+
+- **Minimal boilerplate**: ~10 lines of CMake per example
+- **No manual headers**: Generated automatically at build time
+- **Consistent API**: All resources use `get<Filename><Extension>()` pattern
+- **Type safety**: `ResourceResult` provides structured access to data and size
+- **Error handling**: Built-in error detection via `if (!res)` or `.error` field
+- **Cross-platform**: Windows RC and Linux object files handled transparently
+- **Security**: Path validation and bounds checking built-in
+- **Maintainability**: Library improvements benefit all projects automatically
+- **Clean separation**: resource_tools is an example dependency, not forced on SDLXX consumers
+
+### Negative
+
+- **External dependency**: Requires resource_tools via FetchContent
+  - Mitigated: Automatic download/build, minimal overhead
+
+- **Generated naming**: Function names derived from filenames
+  - Example: `PressStart2P-Regular.ttf` → `getPressstart2pRegularTTF()`
+  - Mitigated: Clear documentation and examples in CLAUDE.md
+
+- **Build directory headers**: Headers generated in build dir, not source dir
+  - Expected: Standard practice for generated code
+  - IDE warnings expected until build completes
+
+### Neutral
+
+- **API pattern**: `ResourceResult` with `.data` and `.size` members
+- **Namespace per example**: Prevents name collisions across examples
+- **FetchContent from main branch**: Latest fixes, controlled externally
+
+## Examples
+
+### Simple Resource (TicTacToe)
+
+Single PNG file embedded from source directory:
+- `data/CMakeLists.txt`: 10 lines with `embed_resources()`
+- Generated: `tictactoe/embedded_data.h` with `getTicTacToePNG()`
+- Usage: Load texture from `res.data` and `res.size`
+
+### Downloaded Resource (Pong)
+
+TTF font downloaded at build time, then embedded:
+- Custom command downloads font to build directory
+- `embed_resources()` uses `CMAKE_CURRENT_BINARY_DIR` as `RESOURCE_DIR`
+- Dependency ensures download completes before embedding
+- Generated: `pong/embedded_data.h` with `getPressstart2pRegularTTF()`
+
+## References
+
+- resource_tools library: https://github.com/rvodden/resource_tools
+- Implementation: `src/examples/{tictactoe,pong}/data/CMakeLists.txt`
+- Documentation: CLAUDE.md § Resource Embedding

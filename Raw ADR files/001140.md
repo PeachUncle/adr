@@ -1,0 +1,141 @@
+# ADR: Introduce Owner and Anchor Support in `CapabilityScope`
+
+**Status:** Accepted
+**Date:** 2025-10-25
+**Context:** Applies to `Cocoar.Capabilities` (framework-level enhancement)
+**Decision Type:** Backward-compatible API extension
+
+---
+
+## 🧠 Context
+
+A `CapabilityScope` represents the lifecycle boundary for compositions. In many real-world systems, scopes are not conceptually isolated — they frequently originate from or are strongly associated with a *root subject*, such as:
+
+| Scenario                       | Root Subject                               |
+| ------------------------------ | ------------------------------------------ |
+| A configuration system         | Configuration manager/context              |
+| A plugin framework             | Hosting module                             |
+| A workflow engine              | Workflow definition or execution container |
+| A multi-tenant platform        | Tenant context                             |
+| A pipeline or builder instance | Pipeline host object                       |
+
+In such environments, code may later receive only the `CapabilityScope`, yet still need to enrich or inspect capabilities belonging to a specific, central subject tied to that scope (e.g., the manager, tenant, or engine).
+
+Today, there is no first-class way to associate or retrieve such “anchor subjects” from the scope. As a result, extension code must pass additional references around manually, or incorrectly treat the scope itself as a subject — which is semantically misleading.
+
+---
+
+## ✅ Decision
+
+We introduce a structured way to associate a scope with well-known subjects via **anchors**, along with a single optional **Owner** for clarity in scenarios where one subject is considered canonical.
+
+### The `CapabilityScope` will now support:
+
+| Concept           | Cardinality          | Purpose                                                                                             |
+| ----------------- | -------------------- | --------------------------------------------------------------------------------------------------- |
+| **Owner**         | 0 or 1               | A distinguished, primary subject that conceptually owns or leads this scope.                        |
+| **Typed Anchors** | ≤ 1 per `Type`       | Allows retrieval of a known subject by known type.                                                  |
+| **Named Anchors** | ≤ 1 per `string` key | Enables flexible contextual attachments (e.g., `"tenant:acme"`, `"environment"`, `"pipeline:foo"`). |
+
+### API characteristics
+
+✅ Anchors are stored as `WeakReference<object>` to prevent memory leaks.
+✅ **Owner safety**: `Owner.Set()` throws if owner already set; use `Owner.Replace()` for explicit replacement.
+✅ **Fluent chaining**: API returns self for fluent chaining; use `.Scope` to return to scope
+✅ Retrieval is explicit via `Owner.TryGet`, `Anchors.Get<T>()`, and `Anchors.TryGet()`.
+✅ Ergonomic sugar will exist for composing directly from owner/anchors:
+
+```csharp
+scope.Owner.Compose()
+scope.Owner.Compose<T>()
+scope.Anchors.Compose<T>()
+scope.Anchors.Compose("key")
+```
+
+✅ Anchors are optional; existing usage continues to work without modification.
+✅ `Owner` is a convenience anchor with semantic weight — but it is not mandatory.
+✅ **Grouped API**: All owner operations under `scope.Owner.*`, all anchor operations under `scope.Anchors.*`
+
+---
+
+## ✨ Example Usage
+
+```csharp
+// During scope initialization (e.g., in a host object)
+scope.Owner.Set(this).Scope  // Throws if called twice (use Replace for replacement)
+     .Anchors.Set<PipelineHost>(this).Scope
+     .Anchors.Set("environment", envContext);
+
+// Replacement scenario (explicit overwrite)
+scope.Owner.Replace(newHost);  // Explicit replacement allowed
+
+// Later – only scope is known:
+var host = scope.Owner.Get<PipelineHost>();
+scope.Compose(host).Add(new PipelineDiagnosticsCapability()).Build();
+
+// Via owner/anchor composition:
+scope.Owner.Compose().Add(new PipelineDiagnosticsCapability()).Build();
+
+// Via typed or named anchors:
+var env = scope.Anchors.Get<EnvironmentContext>();
+scope.Anchors.Compose<EnvironmentContext>().Add(new EnvironmentCapability()).Build();
+```
+
+---
+
+## 📍 Rationale
+
+This design:
+
+| Benefit                                                                                 | Explanation |
+| --------------------------------------------------------------------------------------- | ----------- |
+| ✅ Enables composition against meaningful subjects even when only the scope is available |             |
+| ✅ General-purpose (not tied to any specific domain or consumer)                         |             |
+| ✅ Future-proof (supports multi-tenant, multi-context, module-based architectures)       |             |
+| ✅ Improves clarity vs. attaching capabilities to the scope itself                       |             |
+| ✅ Weak references avoid retention issues                                                |             |
+| ✅ Backward compatible                                                                   |             |
+
+---
+
+## 📉 Alternatives Considered (and Rejected)
+
+| Option                                       | Rejected Because                                                               |
+| -------------------------------------------- | ------------------------------------------------------------------------------ |
+| Only a single Owner (no anchors)             | Too restrictive for scenarios with multiple contextual subjects                |
+| Only anchors (no Owner)                      | Loses clarity in cases where one subject is clearly primary                    |
+| Attaching capabilities directly to the scope | Blurs semantics — scope is a container, not a subject                          |
+| Ambient context (`AsyncLocal`, static)       | Implicit, harder to reason about, unsuitable for parallel scopes               |
+| Parent/child scopes                          | More complex than needed for this use case; may still be added later if needed |
+
+---
+
+## 📦 Consequences
+
+✅ Extension scenarios are now easier and more expressive
+✅ Small cognitive overhead: users must understand the distinction between scope, owner, and anchor subjects
+✅ Responsibility is on the scope creator to correctly assign anchors
+✅ Attempts to resolve missing or GC’d anchors result in `false` (for `Try...`) or exceptions (for `...OrThrow`)
+
+---
+
+## 📅 Next Steps
+
+| Task                                                               | Status |
+| ------------------------------------------------------------------ | ------ |
+| Implement Owner and anchor APIs with weak references               | ✅      |
+| Add `Owner.Set()` safety check (throw on duplicate)                | ✅      |
+| Add `Owner.Replace()` for explicit owner replacement               | ✅      |
+| Group API into `scope.Owner.*` and `scope.Anchors.*`              | ✅      |
+| Add `Owner.Compose()` / `Anchors.Compose()` composer helpers       | ✅      |
+| Add `GetOrThrow` aliases for explicit naming preference            | ✅      |
+| Add unit tests for anchor retrieval, GC cleanup, and failure cases | ✅      |
+| Add tests for Owner.Set/Replace safety behavior                    | ✅      |
+| Update documentation (README, ADR, quick reference)                | ✅      |
+
+---
+
+## ✅ Outcome
+
+`CapabilityScope` becomes contextual, extensible, and aware of its originating subject(s) without compromising immutability, safety, or generality.
+

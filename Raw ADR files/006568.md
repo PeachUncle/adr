@@ -1,0 +1,89 @@
+# ADR-001: Registry-Based Architecture & Unified API
+
+**Date:** 2025-12-14
+**Status:** Accepted
+**Context:** Backend Scalability & Maintenance
+**Authors:** ActionPlan PM, Backend Team
+
+## Context
+
+In the initial Proof of Concept (PoC), the platform supported two algorithms: Interval Coverage and Binary Search. Each algorithm had:
+
+1. A dedicated API endpoint (e.g., `/api/trace/binary-search`).
+2. Dedicated Pydantic models in `app.py` for input validation.
+3. Hardcoded routing logic in `app.py`.
+
+**The Problem:**
+To add a 3rd, 4th, or Nth algorithm, a developer would need to:
+
+- Modify `app.py` (violating the Open/Closed Principle).
+- Add new route handlers.
+- Define new Pydantic models in the global scope.
+- Update the Frontend to point to a new URL.
+
+This approach creates high coupling between the core application server and specific algorithm implementations, making the platform brittle and hard to scale.
+
+## Decision
+
+We will adopt a **Registry-Based Architecture** with a **Unified API Endpoint**.
+
+### 1. The Registry Pattern
+
+We will implement a central `AlgorithmRegistry` singleton that manages available algorithms.
+
+- **Mechanism:** Algorithms "self-register" or are registered at startup.
+- **Lookup:** The registry maps string keys (e.g., `"binary-search"`) to `AlgorithmTracer` classes.
+- **Discovery:** The registry provides metadata (display name, description, examples) for UI population.
+
+### 2. The Unified API Endpoint
+
+We will replace all algorithm-specific endpoints with a single entry point:
+
+- **Route:** `POST /api/trace/unified`
+- **Payload Contract:**
+  ```json
+  {
+    "algorithm": "string (key)",
+    "input": { ...algorithm_specific_data... }
+  }
+  ```
+
+### 3. Abstract Base Class (`AlgorithmTracer`)
+
+All algorithms must inherit from a base class that enforces a standard interface:
+
+- `execute(input_data)`: Returns the standard trace format.
+- `get_prediction_points()`: Returns active learning moments.
+- `generate_narrative()`: Returns the human-readable explanation.
+
+### 4. Input Validation Delegation
+
+Input validation responsibility moves from `app.py` (global Pydantic models) to the specific `Tracer` classes. `app.py` only validates the envelope (`algorithm` and `input` fields exist).
+
+## Consequences
+
+### Positive
+
+- **Scalability:** Adding a new algorithm requires **zero changes** to `app.py` or frontend routing logic.
+- **Decoupling:** `app.py` acts purely as a dispatcher. Algorithm logic is isolated in `backend/algorithms/`.
+- **Frontend Simplicity:** The frontend uses a single `useTraceLoader` hook that hits one endpoint, changing only the payload.
+- **Dynamic UI:** The "Algorithm Switcher" dropdown is populated dynamically via `GET /api/algorithms`, meaning new algorithms appear automatically.
+
+### Negative
+
+- **Runtime Discovery:** If an algorithm fails to register (e.g., import error), it simply won't appear, which can be harder to debug than a hard crash.
+- **Loose Typing:** The `input` field in the API is generic JSON (`dict`). We lose the strict compile-time/startup-time validation of global Pydantic models in favor of runtime validation inside the Tracer.
+
+## Compliance
+
+This architecture is **LOCKED**.
+
+- **Do not** add new routes to `app.py` for specific algorithms.
+- **Do not** hardcode algorithm names in the frontend API calls.
+- **Must** inherit from `AlgorithmTracer`.
+
+## References
+
+- `backend/algorithms/registry.py`
+- `backend/algorithms/base_tracer.py`
+- `backend/app.py` (Dispatcher logic)

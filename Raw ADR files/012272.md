@@ -1,0 +1,536 @@
+## Context
+
+The NaijaCapital Connect platform requires a comprehensive administrative approval and oversight system to ensure platform quality, prevent fraud, and maintain regulatory compliance. This design covers the technical architecture for implementing a multi-phase admin system with opportunity approval workflow, user management, compliance monitoring, financial oversight, and system configuration capabilities.
+
+**Constraints:**
+
+- Must maintain backward compatibility with existing investor and business owner workflows
+- Database must support concurrent admin actions without race conditions
+- Email notifications must be async to avoid blocking API responses
+- Audit logs must be immutable and queryable for compliance
+- UI must support bulk operations for admin efficiency
+- System must scale to support 100+ admins reviewing 1000+ opportunities/month
+
+**Stakeholders:**
+
+- Platform Administrators (primary users)
+- Business Owners (affected by approval workflow)
+- Investors (indirectly affected by quality improvements)
+- Compliance/Legal team (audit log consumers)
+- Platform Operators (system configuration users)
+
+## Goals / Non-Goals
+
+**Goals:**
+
+1. Implement opportunity approval workflow preventing unauthorized publications
+2. Provide comprehensive user account management with audit trails
+3. Enable compliance monitoring with automated flagging and manual review
+4. Support financial oversight for withdrawals, transactions, and revenue tracking
+5. Create configurable platform settings managed through admin UI
+6. Ensure all admin actions are logged for audit and accountability
+7. Maintain sub-2-second response times for admin operations
+8. Support email notifications for all critical status changes
+
+**Non-Goals:**
+
+1. Multi-admin approval requirements (future enhancement)
+2. Advanced ML-based fraud detection (future enhancement)
+3. KYC document OCR/parsing (future enhancement)
+4. Real-time collaboration between admins (future enhancement)
+5. Mobile admin app (web-only for now)
+6. Integration with external compliance tools (future enhancement)
+7. Advanced BI/analytics beyond basic dashboards
+8. Payment gateway admin controls (out of scope for MVP)
+
+## Architecture Overview
+
+### System Components
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Admin Dashboard (UI)                     │
+├──────────────┬──────────────┬──────────────┬────────────────┤
+│ Opportunity  │     User     │  Compliance  │   Financial    │
+│   Review     │  Management  │      &       │   Oversight    │
+│              │              │  Moderation  │                │
+└──────┬───────┴──────┬───────┴──────┬───────┴────────┬───────┘
+       │              │              │                │
+       v              v              v                v
+┌─────────────────────────────────────────────────────────────┐
+│                   API Layer (Next.js Routes)                 │
+│  /api/admin/opportunities/*  |  /api/admin/users/*          │
+│  /api/admin/reports/*        |  /api/admin/withdrawals/*    │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           v
+┌─────────────────────────────────────────────────────────────┐
+│                    Business Logic Layer                      │
+│  • Authorization (admin role check)                          │
+│  • Status transition validation                              │
+│  • Audit logging                                             │
+│  • Notification orchestration                                │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           v
+┌─────────────────────────────────────────────────────────────┐
+│                     Data Layer (Prisma)                      │
+│  Business | User | ReportedContent | AdminAuditLog           │
+│  WithdrawalRequest | PlatformSettings | Notification         │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           v
+┌─────────────────────────────────────────────────────────────┐
+│                    Database (PostgreSQL)                     │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│                  External Services (Async)                   │
+│  • Email Service (SMTP/SendGrid)                             │
+│  • Background Jobs (optional: BullMQ for scale)              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Decisions
+
+### Decision 1: Opportunity Status Enum Extensions
+
+**Choice**: Extend existing OpportunityStatus enum with new states rather than separate approval model
+
+**Alternatives Considered:**
+
+1. **Separate Approval model** (one-to-one with Business) - Rejected due to data duplication and complex joins
+2. **Status as string field** - Rejected due to lack of type safety and validation
+3. **Extend enum** (CHOSEN) - Clean, type-safe, simple queries
+
+**Rationale**: Extending the enum keeps the data model simple, leverages existing status field, and provides type safety. The additional fields (reviewedBy, rejectionReason) are optional and don't bloat the model.
+
+**Trade-offs**:
+
+- ✅ Simple queries: `WHERE status = 'PENDING_REVIEW'`
+- ✅ No additional joins required
+- ✅ Clear status transition validation
+- ❌ Migration complexity if status rules become more complex
+- ❌ Cannot track detailed approval history (mitigated with AdminAuditLog)
+
+### Decision 2: Audit Logging Strategy
+
+**Choice**: Dedicated AdminAuditLog table with JSON details field
+
+**Alternatives Considered:**
+
+1. **Event sourcing** - Rejected as over-engineering for current scale
+2. **Generic activity log** - Rejected due to lack of admin-specific indexes and queries
+3. **Dedicated admin log** (CHOSEN) - Optimized for admin action queries
+
+**Rationale**: A dedicated table with indexed fields (adminId, action, targetType, timestamp) allows fast querying for compliance and troubleshooting. JSON details field provides flexibility for action-specific context without rigid schema.
+
+**Implementation**:
+
+```typescript
+model AdminAuditLog {
+  id         String   @id @default(cuid())
+  adminId    String
+  action     String   // "APPROVE_OPPORTUNITY", "SUSPEND_USER", etc.
+  targetType String   // "BUSINESS", "USER", "WITHDRAWAL", etc.
+  targetId   String
+  details    Json?    // Flexible context: { reason, notes, previousStatus, etc. }
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  admin User @relation(fields: [adminId], references: [id])
+
+  @@index([adminId, createdAt])
+  @@index([targetType, targetId])
+  @@index([action, createdAt])
+}
+```
+
+### Decision 3: Email Notification Architecture
+
+**Choice**: Async email sending with immediate in-app notification
+
+**Alternatives Considered:**
+
+1. **Synchronous email** - Rejected due to blocking API responses (3-5s per email)
+2. **Background queue (BullMQ)** - Deferred as over-engineering for MVP scale
+3. **Fire-and-forget async** (CHOSEN) - Simple, non-blocking, acceptable for MVP
+
+**Rationale**: Using `Promise.all()` with fire-and-forget pattern keeps API responses fast while ensuring notifications are sent. For MVP scale (<1000 emails/day), this is sufficient. Can migrate to proper queue later if needed.
+
+**Implementation**:
+
+```typescript
+// In approval endpoint
+await prisma.business.update({ status: 'OPEN', ... });
+
+// Don't await - fire and forget
+sendEmailNotification(ownerId, 'opportunity-approved', context).catch(err =>
+  logger.error('Email failed', err)
+);
+
+// Create in-app notification (do await)
+await prisma.notification.create({ ... });
+
+return NextResponse.json({ success: true });
+```
+
+**Trade-offs**:
+
+- ✅ Fast API responses (<200ms)
+- ✅ Simple implementation, no queue infrastructure
+- ✅ In-app notifications guaranteed (awaited)
+- ❌ Email failures are silent (logged but not retried)
+- ❌ Cannot track delivery status
+- ⚠️ May need queue for scale (>5000 emails/day)
+
+### Decision 4: Bulk Operations Strategy
+
+**Choice**: Client-side parallel requests with progress tracking
+
+**Alternatives Considered:**
+
+1. **Server-side batch endpoint** - Deferred due to complexity and lack of immediate need
+2. **Client-side sequential** - Rejected due to slow UX (10s of seconds for 20 items)
+3. **Client-side parallel** (CHOSEN) - Fast, simple, good UX with progress indicators
+
+**Rationale**: For MVP, admins rarely bulk-approve more than 20-30 items at once. Client-side parallel requests (using `Promise.allSettled()`) provide fast execution with clear progress feedback. Can add server-side batch endpoint later if needed.
+
+**Implementation**:
+
+```typescript
+// Frontend bulk approve
+const results = await Promise.allSettled(
+  selectedIds.map((id) =>
+    fetch(`/api/admin/opportunities/${id}/approve`, { method: "POST" })
+  )
+);
+
+// Show results: X succeeded, Y failed
+const succeeded = results.filter((r) => r.status === "fulfilled").length;
+const failed = results.filter((r) => r.status === "rejected").length;
+```
+
+### Decision 5: User Suspension vs Ban
+
+**Choice**: Two separate states with different semantics
+
+**Rationale**:
+
+- **Suspended**: Temporary, reversible, account can be reactivated
+- **Banned**: Permanent, cannot login, all content hidden
+
+**Fields**:
+
+```typescript
+model User {
+  suspended        Boolean   @default(false)
+  suspendedAt      DateTime?
+  suspensionReason String?
+  bannedAt         DateTime?
+  banReason        String?
+}
+```
+
+**Business Logic**:
+
+- Suspended users see "Account suspended" message, can contact support
+- Banned users see "Account terminated" message, no recourse
+- Middleware checks both fields on authentication
+
+### Decision 6: Opportunity Visibility Rules
+
+**Choice**: Status-based visibility with role-aware filtering
+
+**Rules**:
+
+1. **PENDING_REVIEW, NEEDS_REVISION**: Only visible to owner and admins
+2. **OPEN**: Visible to all users (public)
+3. **REJECTED, SUSPENDED**: Only visible to owner and admins
+4. **CLOSED, FULLY_FUNDED, CANCELLED**: Visible to all users (historical record)
+
+**Implementation**:
+
+```typescript
+// In GET /api/opportunities route
+const where: any = {};
+
+if (session?.user?.role !== "ADMINISTRATOR") {
+  // Non-admins can only see OPEN, CLOSED, FULLY_FUNDED, CANCELLED
+  where.status = { in: ["OPEN", "CLOSED", "FULLY_FUNDED", "CANCELLED"] };
+}
+
+// Admins see everything (no status filter)
+```
+
+### Decision 7: Compliance Flagging Strategy
+
+**Choice**: Manual reporting + automated rule-based flagging
+
+**Automated Flags** (Phase 3):
+
+1. Multiple failed investment attempts (5+ in 24 hours)
+2. Rapid withdrawal requests after investment
+3. Same IP creating multiple business owner accounts
+4. Unusually high ROI promises (>100% annually)
+5. Identical business descriptions across multiple opportunities
+
+**Implementation**: Cron job or background task runs daily, creates ReportedContent entries with `reportType: 'AUTOMATED_FLAG'`
+
+**Manual Reports**: User-initiated reports via UI, creates ReportedContent with `reportType: 'USER_REPORT'`
+
+## Data Model Details
+
+### Extended Business Model
+
+```prisma
+model Business {
+  // Existing fields...
+
+  // Approval workflow fields
+  reviewedBy        String?   // Admin user ID
+  reviewedAt        DateTime?
+  rejectionReason   String?   // Required if status = REJECTED
+  adminNotes        String?   // Internal admin notes
+  revisionRequests  String?   // Feedback sent to business owner
+  isFeatured        Boolean   @default(false)
+  submittedAt       DateTime  @default(now())
+
+  reviewer User? @relation("BusinessReviewer", fields: [reviewedBy], references: [id])
+}
+```
+
+### New ReportedContent Model
+
+```prisma
+enum ReportStatus {
+  PENDING
+  UNDER_REVIEW
+  RESOLVED
+  DISMISSED
+}
+
+model ReportedContent {
+  id            String       @id @default(cuid())
+  reportType    String       // "USER_REPORT", "AUTOMATED_FLAG"
+  targetType    String       // "BUSINESS", "USER", "INVESTMENT"
+  targetId      String
+  reportedById  String?      // Null for automated flags
+  reportReason  String       // "Fraud", "Inappropriate", "Suspicious Activity"
+  description   String
+  status        ReportStatus @default(PENDING)
+  priority      String       @default("MEDIUM") // "LOW", "MEDIUM", "HIGH", "CRITICAL"
+  reviewedBy    String?
+  reviewedAt    DateTime?
+  resolution    String?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  reportedBy User? @relation("Reporter", fields: [reportedById], references: [id])
+  reviewer   User? @relation("ReportReviewer", fields: [reviewedBy], references: [id])
+
+  @@index([status, priority])
+  @@index([targetType, targetId])
+}
+```
+
+### PlatformSettings Model
+
+```prisma
+model PlatformSettings {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  value       String
+  dataType    String   // "STRING", "NUMBER", "BOOLEAN", "JSON"
+  category    String   // "INVESTMENT", "COMMISSION", "LIMITS", "FEATURES"
+  description String
+  updatedBy   String
+  updatedAt   DateTime @updatedAt
+
+  updater User @relation(fields: [updatedBy], references: [id])
+}
+```
+
+**Example Settings**:
+
+- `minimum_investment_limit`: 100
+- `maximum_investment_limit`: 100000000
+- `platform_commission_rate`: 2.5
+- `featured_opportunity_slots`: 5
+- `approval_required`: true
+- `maintenance_mode`: false
+
+## API Endpoints Specification
+
+### Opportunity Management
+
+#### POST /api/admin/opportunities/[id]/approve
+
+**Request**: `{ adminNotes?: string, isFeatured?: boolean }`
+**Response**: `{ success: true, opportunity: {...} }`
+**Actions**:
+
+1. Verify admin role
+2. Update status to OPEN, set reviewedBy/reviewedAt
+3. Create audit log entry
+4. Send email notification to business owner
+5. Create in-app notification
+
+#### POST /api/admin/opportunities/[id]/reject
+
+**Request**: `{ rejectionReason: string, adminNotes?: string }`
+**Response**: `{ success: true, opportunity: {...} }`
+**Actions**:
+
+1. Verify admin role
+2. Update status to REJECTED, set rejectionReason
+3. Create audit log entry
+4. Send email notification to business owner
+5. Create in-app notification
+
+#### POST /api/admin/opportunities/[id]/request-changes
+
+**Request**: `{ revisionRequests: string, adminNotes?: string }`
+**Response**: `{ success: true, opportunity: {...} }`
+**Actions**:
+
+1. Verify admin role
+2. Update status to NEEDS_REVISION, set revisionRequests
+3. Create audit log entry
+4. Send email notification to business owner
+5. Create in-app notification
+
+### User Management
+
+#### POST /api/admin/users/[id]/suspend
+
+**Request**: `{ suspensionReason: string, duration?: number }`
+**Response**: `{ success: true, user: {...} }`
+**Actions**:
+
+1. Verify admin role
+2. Set suspended=true, suspendedAt, suspensionReason
+3. Invalidate user sessions
+4. Create audit log entry
+5. Send email notification to user
+
+#### POST /api/admin/users/[id]/verify
+
+**Request**: `{ verificationNotes?: string }`
+**Response**: `{ success: true, user: {...} }`
+**Actions**:
+
+1. Verify admin role
+2. Set verified=true, add verificationNotes
+3. Create audit log entry
+4. Send email notification to user
+
+## Security Considerations
+
+### Authorization
+
+- All `/api/admin/*` routes protected with admin role check
+- Middleware validates JWT and checks `session.user.role === 'ADMINISTRATOR'`
+- Failed auth attempts logged for security monitoring
+
+### Rate Limiting
+
+- Admin endpoints exempt from public rate limits
+- Internal rate limit: 1000 requests/hour per admin
+- Bulk operations count as single request
+
+### Audit Trail
+
+- All admin actions logged with IP address and user agent
+- Logs immutable (insert-only, no updates/deletes)
+- Retention policy: 2 years minimum for compliance
+
+### Data Privacy
+
+- Admin notes and internal comments not exposed to non-admins
+- User personal data access logged in audit trail
+- Rejection reasons visible to business owner but not public
+
+## Performance Considerations
+
+### Database Indexes
+
+```prisma
+// Business model
+@@index([status, createdAt])
+@@index([reviewedBy, reviewedAt])
+@@index([ownerId, status])
+
+// AdminAuditLog
+@@index([adminId, createdAt])
+@@index([targetType, targetId])
+@@index([action, createdAt])
+
+// ReportedContent
+@@index([status, priority])
+@@index([targetType, targetId])
+```
+
+### Query Optimization
+
+- Use pagination for all list endpoints (default limit: 50)
+- Implement cursor-based pagination for large datasets
+- Use `select` to limit fields returned in list views
+- Preload related data with `include` to avoid N+1 queries
+
+### Caching Strategy
+
+- Cache platform settings (Redis or in-memory, 5-minute TTL)
+- No caching for admin dashboards (real-time data required)
+- Cache user role checks in session (1-hour TTL)
+
+## Migration Plan
+
+### Phase 1: Schema Migration
+
+1. Back up production database
+2. Run migration to add new enums and fields
+3. Verify constraints and indexes created
+4. Test rollback migration in staging
+
+### Phase 2: Data Migration
+
+1. Update existing OPEN opportunities: set reviewedBy='SYSTEM', reviewedAt=NOW()
+2. Verify no null constraint violations
+3. Run validation queries to check data integrity
+
+### Phase 3: Code Deployment
+
+1. Deploy API changes (backward compatible)
+2. Deploy UI changes
+3. Monitor error logs for first 24 hours
+4. Verify email notifications working
+
+### Rollback Plan
+
+1. Revert code deployment
+2. Run rollback migration (remove new fields)
+3. Restore database from backup if needed
+4. Notify business owners of rollback
+
+## Open Questions
+
+1. **Email Service**: Use SMTP (self-hosted) or SendGrid (paid service)?
+
+   - **Recommendation**: Start with SMTP for MVP, migrate to SendGrid if scale demands (>10k emails/month)
+
+2. **Withdrawal Approval SLA**: Should large withdrawals (>₦1M) require manual approval?
+
+   - **Recommendation**: Yes, add threshold check in withdrawal flow
+
+3. **Featured Opportunity Limits**: How many opportunities can be featured simultaneously?
+
+   - **Recommendation**: 5 slots, configurable in PlatformSettings
+
+4. **Auto-Suspension Rules**: Should repeated policy violations trigger automatic suspension?
+
+   - **Recommendation**: No for MVP, keep manual review to avoid false positives
+
+5. **Admin Notification**: Should admins be notified when new opportunities are submitted?
+   - **Recommendation**: Yes, daily digest email with pending count + link to review dashboard

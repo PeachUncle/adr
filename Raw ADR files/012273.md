@@ -1,0 +1,151 @@
+## Why
+
+The NaijaCapital Connect platform currently allows business owners to publish investment opportunities directly without any oversight, creating significant risks:
+
+1. **Fraud Prevention**: No mechanism to verify legitimacy of business proposals before they reach investors
+2. **Quality Control**: No filtering for incomplete, misleading, or low-quality investment opportunities
+3. **Regulatory Compliance**: No way to enforce platform policies or prevent prohibited business types
+4. **User Safety**: Investors exposed to unvetted opportunities with potential scams or fraudulent schemes
+5. **Platform Liability**: No audit trail or administrative oversight of published opportunities
+
+Currently, the admin dashboard has placeholder tabs with mock data and limited functionality. This change implements a comprehensive admin approval workflow and management system to establish proper platform governance.
+
+**Business Impact:**
+
+- Reduces fraud risk and protects investor capital
+- Builds trust in the platform through quality assurance
+- Provides regulatory compliance foundation
+- Enables data-driven platform management decisions
+- Creates accountability for business owners
+
+## What Changes
+
+**Phase 1: Opportunity Approval Workflow (Critical)**
+
+- Add new opportunity statuses: `PENDING_REVIEW`, `NEEDS_REVISION`, `REJECTED`, `SUSPENDED`, `FEATURED`
+- Modify Business model with approval workflow fields: `reviewedBy`, `reviewedAt`, `rejectionReason`, `adminNotes`, `revisionRequests`, `isFeatured`
+- Update opportunity creation to default to `PENDING_REVIEW` status
+- Build Admin Opportunity Review interface with filtering and bulk actions
+- Create admin API endpoints for approve/reject/request-changes actions
+- Implement email notifications for opportunity status changes
+- Add opportunity viewing restriction (only `OPEN` visible to investors)
+
+**Phase 2: User Management**
+
+- Add user account actions: suspend, unsuspend, verify, ban
+- Add `suspended`, `bannedAt`, `banReason`, `verificationNotes` fields to User model
+- Build User Management interface with search, filters, and user detail views
+- Create admin API endpoints for user account management
+- Track admin actions in audit log
+- Implement email notifications for account actions
+
+**Phase 3: Compliance & Moderation**
+
+- Add ReportedContent model for user reports on opportunities/users
+- Add ComplianceFlag model for automated suspicious activity detection
+- Build compliance dashboard with flagged content and resolution workflow
+- Create API endpoints for report management and resolution
+- Add automated flagging rules (multiple failed investments, unusual patterns)
+
+**Phase 4: Financial Oversight**
+
+- Add WithdrawalApproval model extending WithdrawalRequest
+- Build financial oversight dashboard with transaction monitoring
+- Create withdrawal approval workflow for admin review
+- Add commission tracking and revenue analytics
+- Implement refund and dispute management
+
+**Phase 5: System Configuration**
+
+- Add PlatformSettings model for configurable platform parameters
+- Build system configuration interface
+- Add audit log for all admin actions (AdminAuditLog model)
+- Implement feature flags and email template customization
+
+**Out of Scope (Future Enhancements):**
+
+- Multi-admin approval requirements (2-factor approval)
+- Automated fraud detection with ML
+- Advanced KYC document verification
+- Payment gateway integration
+- Two-factor authentication for admins
+- IP whitelist restrictions
+- Advanced analytics dashboards
+
+## Impact
+
+**Affected Capabilities:**
+
+- Opportunity Management (approval workflow added)
+- User Management (account controls added)
+- Administrative Controls (new comprehensive admin features)
+- Notifications (new notification types for approvals)
+- Database Schema (multiple model additions and modifications)
+- Dashboard UI (complete admin dashboard rebuild)
+
+**Affected Code:**
+
+- `prisma/schema.prisma` - Add new enums, models, and fields
+- `src/app/api/opportunities/route.ts` - Default to PENDING_REVIEW status
+- `src/app/api/opportunities/[id]/route.ts` - Filter by status
+- `src/components/dashboards/AdministratorDashboard.tsx` - Complete rebuild
+- New files:
+  - `src/app/api/admin/opportunities/[id]/approve/route.ts`
+  - `src/app/api/admin/opportunities/[id]/reject/route.ts`
+  - `src/app/api/admin/opportunities/[id]/request-changes/route.ts`
+  - `src/app/api/admin/users/[id]/suspend/route.ts`
+  - `src/app/api/admin/users/[id]/verify/route.ts`
+  - `src/app/api/admin/withdrawals/[id]/approve/route.ts`
+  - `src/app/api/admin/reports/route.ts`
+  - `src/components/admin/OpportunityReviewPanel.tsx`
+  - `src/components/admin/OpportunityDetailModal.tsx`
+  - `src/components/admin/UserManagementPanel.tsx`
+  - `src/components/admin/CompliancePanel.tsx`
+  - `src/components/admin/FinancialOversightPanel.tsx`
+  - `src/lib/email-templates.ts`
+  - `src/lib/admin-audit.ts`
+
+**Breaking Changes:**
+
+- **BREAKING**: Existing opportunities in database need migration to PENDING_REVIEW or OPEN status
+- **BREAKING**: Business owners can no longer publish opportunities directly (must wait for approval)
+- **BREAKING**: Investor opportunity list will only show OPEN opportunities (previously showed all)
+
+**Migration Path:**
+
+1. Run database migration to add new fields and models
+2. Update existing opportunities: `UPDATE businesses SET status = 'OPEN' WHERE status = 'OPEN' OR status IS NULL`
+3. Add admin review notes to existing opportunities: `UPDATE businesses SET reviewedBy = 'SYSTEM', reviewedAt = NOW(), adminNotes = 'Auto-approved during migration'`
+4. Deploy new API and UI code
+5. Notify business owners of new approval process via email
+
+**Risk Assessment:**
+
+- **High**: Existing business owners may be frustrated by new approval requirement → Mitigate with clear communication and fast approval SLA (24-48 hours)
+- **Medium**: Admin workload spike with backlog of pending opportunities → Mitigate with bulk approval actions and filtering
+- **Low**: False positives in automated compliance flagging → Mitigate with manual review override capability
+- **Low**: Data loss during migration → Mitigate with database backup before migration
+
+**Dependencies:**
+
+- Email service configured (SMTP or SendGrid)
+- Admin accounts created with proper permissions
+- Database backup capability for safe migration
+
+**Timeline:**
+
+- Phase 1 (Opportunity Approval): 4-5 days
+- Phase 2 (User Management): 3-4 days
+- Phase 3 (Compliance): 3-4 days
+- Phase 4 (Financial Oversight): 3-4 days
+- Phase 5 (System Configuration): 2-3 days
+- Testing & Documentation: 3-4 days
+- **Total**: 18-24 days (single developer, full-time)
+
+**Success Metrics:**
+
+- 100% of new opportunities go through approval workflow
+- Average approval turnaround time < 48 hours
+- <5% false positive rate on compliance flags
+- Admin action audit log covers all critical operations
+- Zero unauthorized opportunity publications

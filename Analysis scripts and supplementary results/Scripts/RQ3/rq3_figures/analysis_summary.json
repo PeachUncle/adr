@@ -1,0 +1,14 @@
+{
+  "repositories": 3593,
+  "nondecreasing_star_series": 3593,
+  "star_sum_matches_total": 3593,
+  "star_mode": "cumulative",
+  "last_complete_year": 2025,
+  "excluded_date_rows": 2449,
+  "precreation_commit_rows": 1839,
+  "precreation_repositories_excluded": 514,
+  "dated_adrs_in_complete_years": 15102,
+  "balanced_event_repositories": 153,
+  "date_column": "ADR_first_time",
+  "note": "Current retained ADR snapshot; deleted ADRs and prior text revisions are not recovered."
+}

@@ -1,0 +1,240 @@
+** 1. Context **
+
+FairWorkly is a multi-module SaaS platform consisting of several distinct business domains:
+
+- Auth (authentication & user identity)
+- Compliance (award rule engine, roster checks, Q&A)
+- Documents (company documents & storage)
+- Payroll (summary, pay-run insights)
+- Employee (HR employee directory)
+
+The product is expected to grow into an enterprise-grade application with:
+
+- Multiple engineering contributors
+- Continuous feature expansion
+- Reusable UI components
+- A clean mapping between business domains and code structure
+- Long-term maintainability and onboarding friendliness
+- API alignment with backend domain boundaries
+
+Given these needs, we require a frontend architecture that:
+
+1. Scales across multiple modules
+2. Keeps domain boundaries clear
+3. Encourages code reuse without accidental coupling
+4. Supports React + TypeScript + React Query conventions
+5. Allows independent evolution of modules
+6. Keeps UI, business logic, and API contracts separated
+
+This ADR defines the chosen directory layout and modular structure of the FairWorkly frontend.
+
+** 2. Decision **
+
+We will structure the FairWorkly frontend as follows:
+
+src/
+├── main.tsx
+├── app/ # App shell (providers, routes)
+├── store/ # Redux store (cross-module)
+├── services/ # API layer (React query)
+├── slices/ # Cross-domain global state (auth/ui/notifications)
+├── modules/ # Business modules (feature-driven)
+│ ├── home/
+│ ├── auth/
+│ ├── compliance/
+│ ├── documents/
+│ ├── payroll/
+│ └── employee/
+├── shared/ # Reusable components/logics/utilities
+├── assets/
+└── styles/
+
+2.1 Modules represent business domains
+
+Each folder under modules/ maps to a backend bounded context:
+
+modules/compliance ↔ Backend: Domain.Compliance + Application.Compliance
+modules/payroll ↔ Backend: Domain.Payroll + Application.Payroll
+modules/employee ↔ Backend: Domain.Employees
+
+Each module contains:
+
+modules/<module>/
+pages/ # Route-level pages (public UI entry)
+features/ # Medium-to-large domain-specific UI units (smart components)
+ui/ # Pure presentational components (reusable within module only)
+hooks/ # Business logic hooks (module-specific)
+types/ # Domain types, DTO shapes, API contract
+
+2.2 Shared folder stores global reusable pieces
+
+shared/components/ui → design system components
+shared/hooks → cross-module hooks
+shared/utils → formatters, validators, helpers
+shared/types → global types (e.g., ApiResponse, Pagination)
+
+Rules:
+
+- Anything used by multiple modules → shared/
+- Anything used by only one module → stays inside that module
+- UI components follow atomic design levels:
+
+              * shared = product-wide atoms/molecules
+              * modules/<domain>/ui = domain-specific UI atoms
+              * modules/<domain>/features = composite components with logic
+
+2.3 API layer is separated from modules
+
+All HTTP/API code lives in: services/\*.ts
+
+Each file maps to a backend API domain:
+
+- complianceApi.ts
+- payrollApi.ts
+- documentsApi.ts
+  …
+
+Modules import API functions instead of creating fetch logic inside pages/components.This maintains:
+
+- Single responsibility
+- Mocking/testability
+- API change isolation
+
+2.4 Redux is used only for global concerns
+
+Only application-wide concerns go into store/ and slices/:
+
+- authentication state
+- theme state
+- notifications
+- global UI flags
+
+Domain-specific state lives inside:
+
+- React Query caches
+- Module hooks
+- Local component state
+
+This avoids Redux bloat and improves performance.
+
+2.5 Routing is centralized
+
+All routes are declared in: app/routes/
+Modules export their own lazy-loaded route lists.
+
+2.6 Strong typing and domain alignment
+
+Each module maintains a types folder to represent:
+
+- DTOs returned by backend module
+- Business entities
+- Enum values
+- API request/response schemas
+
+This guarantees:
+
+- A 1:1 alignment with backend business domain
+- Contract clarity
+- Easier onboarding
+- Faster refactor safety
+
+** 3. Rationale **
+
+We selected this architecture because it provides:
+
+3.1 Scalability
+
+Modules can grow independently without bloating the root src/ folder.
+
+3.2 Clear domain boundaries
+
+Future engineers instantly understand:
+
+- Compliance logic → /modules/compliance
+- Payroll logic → /modules/payroll
+
+3.3 High cohesion, low coupling
+
+- UI components stay near where they’re used
+- Business logic stays inside hooks
+- Types stay inside domain folders
+- Shared library is clean and intentional
+
+3.4 Aligns front-end and backend architectures
+
+This mirrors backend layering:
+
+frontend modules ↔ backend bounded contexts
+frontend pages ↔ backend API endpoints
+frontend types ↔ backend DTOs
+frontend hooks ↔ backend application commands/queries
+
+This significantly reduces mental overhead across teams.
+
+3.5 Supports parallel work
+
+Different developers can build different modules without merge conflicts.
+
+3.6 Supports lazy-loading and code splitting
+
+Pages and modules can be dynamically imported.
+
+3.7 Supports design system growth
+
+shared/components/ui can evolve into a design system similar to:
+
+- Shopify Polaris
+- MUI Base
+- Radix UI
+
+4. Alternatives Considered
+
+A. Flat feature folder without domain modules
+Rejected because:
+
+- No domain boundaries
+- Impossible to scale beyond ~50 files
+- Difficult onboarding
+- Hard to manage cross-team development
+
+B. Colocating everything inside feature folders
+Rejected because:
+
+- Types/hooks/UI components become fragmented
+- Hard to reuse components
+- Leads to duplication
+- Difficult for API alignment
+
+C. Next.js-style /app route-first
+Rejected because FairWorkly requires:
+
+- Cross-module React Query
+- RTK integration
+- Non-SSR architecture
+- Progressive module isolation
+
+5. Consequences
+
+5.1 Positive
+
+- Scales well with new business domains
+- Extremely easy for onboarding engineers
+- Clear mapping between backend and frontend
+- Encourages clean separation of concerns
+- Reduces accidental coupling between modules
+- Easier to test and mock API layers
+- No global Redux clutter
+- Enables lazy-loading and optimized bundles
+
+5.2 Negative
+
+- Slightly more directory depth
+- Developers need to follow module boundaries strictly
+- Over-modularization risk if engineers don’t follow guidelines
+
+6. Decision Outcome
+
+This directory structure becomes the official standard for FairWorkly front-end development.
+All new modules and features must follow the domain-first structure defined here.
+
+Future architecture decisions (MFE, design-system extraction, backend-for-frontend) will extend this foundation.
